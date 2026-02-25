@@ -170,7 +170,7 @@ def extract_json_safe(content: str):
     except Exception as e:
         print(f"JSON extraction failed: {e}")
         # Log the raw content to a file for investigation
-        log_path = "d:/SPJIMR/Course/Term 3/Makers Lab/Group Assignemtn/backend/json_fail.log"
+        log_path = os.path.join(config.BASE_DIR, "json_fail.log")
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"\n--- {time.ctime()} ---\n")
             f.write(f"Error: {str(e)}\n")
@@ -751,7 +751,7 @@ Respond with exactly this JSON structure:
                     ai_results = res.json()
                     
                     # Log to file for remote debugging
-                    log_path = "d:/SPJIMR/Course/Term 3/Makers Lab/Group Assignemtn/backend/mistral_debug.log"
+                    log_path = os.path.join(config.BASE_DIR, "mistral_debug.log")
                     with open(log_path, "a") as f:
                         f.write(f"\n--- {time.ctime()} ---\n")
                         f.write(f"Status: {res.status_code}\n")
@@ -772,7 +772,7 @@ Respond with exactly this JSON structure:
                                 break
                         except Exception as e:
                             print(f"Mistral JSON parse error in feedback: {e}")
-                            log_path = "d:/SPJIMR/Course/Term 3/Makers Lab/Group Assignemtn/backend/mistral_debug.log"
+                            log_path = os.path.join(config.BASE_DIR, "mistral_debug.log")
                             with open(log_path, "a") as f:
                                 f.write(f"Parse Error: {str(e)}\nRaw Content: {content}\n")
                     
