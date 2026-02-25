@@ -2,7 +2,7 @@
 title: Classroom Companion API
 emoji: 🎓
 colorFrom: blue
-colorTo: teal
+colorTo: indigo
 sdk: docker
 pinned: false
 ---
