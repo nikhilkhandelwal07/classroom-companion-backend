@@ -94,9 +94,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         'http://localhost:5173',
-        'http://localhost:3000',
-        'https://your-app-name.vercel.app',
-        '*'  # Allow all for now as requested, but we will restrict later
+        'https://classroom-companion-spjimr.vercel.app'
     ],
     allow_credentials=True,
     allow_methods=["*"],
