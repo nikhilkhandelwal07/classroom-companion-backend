@@ -139,33 +139,49 @@ def extract_json_safe(content: str):
         json_str = cleaned[start:end]
         
         # 3. Aggressive control character removal
-        # Replace newlines/tabs inside strings with spaces
-        # Note: This is a bit risky but helped in previous iterations with these models
+        # AI often puts literal newlines inside string values which breaks json.loads
+        # We replace them with a space ONLY if they are not preceded by a backslash
         json_str = re.sub(r'(?<!\\)\n', ' ', json_str)
         json_str = re.sub(r'(?<!\\)\t', ' ', json_str)
         
-        # Try parsing
+        # 4. Try parsing first
         try:
             return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            # Final attempt: try to fix common AI hallucinations
-            # 1. Remove markdown bolding prefixes that end up outside quotes like **"
-            fixed = re.sub(r'\*\*\s*"', '"', json_str)
-            # 2. Fix unescaped quotes inside string values (aggressive)
-            # This matches "key": "value with "inner" quotes"
-            # It's hard to do perfectly, but let's try to fix trailing quotes
-            fixed = re.sub(r',(?!\s*["}\]])', r'\,', fixed) # Very basic
+        except json.JSONDecodeError as first_e:
+            # 5. HEURISTICS FOR COMMON AI ERRORS
+            fixed = json_str
             
-            # 3. Remove trailing commas before } or ]
-            fixed = re.sub(r',\s*([}\\]])', r'\1', fixed)
+            # (A) Fix missing commas between key-value pairs or list items
+            # Example: "summary": "text" "working_well": [...] -> missing comma
+            # Look for " followed by whitespace then " that isn't preceded by a colon
+            # This is tricky, but let's try a safer version:
+            # If a line seems to end a value and the next starts a key/value
+            fixed = re.sub(r'(\"|\]|\})\s*\"(\w+)\"\s*:', r'\1, "\2":', fixed)
+            
+            # (B) Fix missing commas in arrays of strings
+            # Example: ["point 1" "point 2"] -> missing comma
+            fixed = re.sub(r'\"(\s+)\"', r'", "', fixed)
+            
+            # (C) Remove markdown bolding prefixes that end up outside quotes like **"
+            fixed = re.sub(r'\*\*\s*"', '"', fixed)
+            
+            # (D) Remove trailing commas before } or ]
+            fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+
+            # (E) Fix unescaped quotes inside string values (Best effort)
+            # Find patterns like "key": "value with "inner" quotes"
+            # This is hard to regex perfectly, but we can try to escape quotes
+            # that are not at the start/end of a JSON structure.
+            # (Skip for now as it's very prone to breaking valid structures)
+
             try:
                 return json.loads(fixed)
-            except:
-                print(f"DEBUG: JSON Parse Error at char {e.pos}: {e.msg}")
+            except json.JSONDecodeError as second_e:
+                print(f"DEBUG: JSON Fix Failed. Original Error: {first_e.msg}. Fixed Error: {second_e.msg}")
                 # Log a bit more around the error
-                snippet = json_str[max(0, e.pos-100):min(len(json_str), e.pos+100)]
-                print(f"DEBUG: Problematic content snippet: {snippet}")
-                raise e
+                snippet = fixed[max(0, second_e.pos-100):min(len(fixed), second_e.pos+100)]
+                print(f"DEBUG: Problematic fixed snippet: {snippet}")
+                raise second_e
 
     except Exception as e:
         print(f"JSON extraction failed: {e}")
@@ -734,7 +750,7 @@ Rules:
 Feedback (Rating/5: Comment):
 {all_text}
 
-Respond with exactly this JSON structure:
+Respond with exactly this JSON structure (ensure all keys and values are in double quotes, and all items are comma-separated):
 {{"summary": "3-4 sentence synthesis here", "working_well": ["point 1", "point 2", "point 3"], "areas_to_improve": ["point 1", "point 2", "point 3"]}}"""
                 
                 # Use OpenAI-compatible chat payload for Mistral on router.huggingface.co
@@ -917,6 +933,7 @@ Constraint:
 - Respond ONLY with a valid JSON object.
 - DO NOT use markdown bolding (**) outside of double quotes.
 - Ensure all double quotes inside string values are escaped with a backslash (\").
+- Ensure all keys and values are comma-separated correctly.
 - No conversational text, no markdown code blocks, no preamble.
 
 Required JSON Structure:
@@ -982,6 +999,7 @@ Constraint:
 - Respond ONLY with a valid JSON object.
 - DO NOT use markdown bolding (**) outside of double quotes.
 - Ensure all double quotes inside string values are escaped with a backslash (\").
+- Ensure all keys and values are comma-separated correctly.
 - No conversational text, no markdown code blocks, no preamble.
 """
     
