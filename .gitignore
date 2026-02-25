@@ -1,0 +1,39 @@
+# Sensitive Info
+.env
+*.json
+!package.json
+!package-lock.json
+!classroom-companion-*.json
+
+# Credentials
+classroom-companion-*.json
+credentials.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.history/
+
+# RAG/Vector DB
+faiss_db/
+data/materials/*
+!data/materials/.gitkeep
+
+# Logs
+*.log
+mistral_debug.log
+rag_debug.log
+email_delivery.log
+json_fail.log
+
+# OS
+.DS_Store
+Thumbs.db
