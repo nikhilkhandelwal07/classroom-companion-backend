@@ -753,9 +753,9 @@ Feedback (Rating/5: Comment):
 Respond with exactly this JSON structure (ensure all keys and values are in double quotes, and all items are comma-separated):
 {{"summary": "3-4 sentence synthesis here", "working_well": ["point 1", "point 2", "point 3"], "areas_to_improve": ["point 1", "point 2", "point 3"]}}"""
                 
-                # Use OpenAI-compatible chat payload for Mistral on router.huggingface.co
+                # Use OpenAI-compatible chat payload for Llama on router.huggingface.co
                 payload = {
-                    "model": "mistralai/Mistral-7B-Instruct-v0.3",
+                    "model": "meta-llama/Llama-3.1-8B-Instruct",
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 600,
                     "temperature": 0.3
@@ -827,7 +827,7 @@ def call_mistral_inference(prompt: str, max_tokens: int = 600, temperature: floa
     """Calls Mistral-7B-Instruct-v0.2 via HF Inference API Router."""
     headers = {"Authorization": f"Bearer {config.HF_API_TOKEN}"}
     payload = {
-        "model": "mistralai/Mistral-7B-Instruct-v0.3",
+        "model": "meta-llama/Llama-3.1-8B-Instruct",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": temperature
