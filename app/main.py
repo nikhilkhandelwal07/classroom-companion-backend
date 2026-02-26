@@ -755,7 +755,7 @@ Respond with exactly this JSON structure (ensure all keys and values are in doub
                 
                 # Use OpenAI-compatible chat payload for Mistral on router.huggingface.co
                 payload = {
-                    "model": "mistralai/Mistral-7B-Instruct-v0.2",
+                    "model": "mistralai/Mistral-7B-Instruct-v0.3",
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 600,
                     "temperature": 0.3
@@ -774,7 +774,11 @@ Respond with exactly this JSON structure (ensure all keys and values are in doub
                         f.write(f"Response: {json.dumps(ai_results)[:1000]}\n")
                     
                     if isinstance(ai_results, dict) and "error" in ai_results:
-                        if "loading" in ai_results.get("error", "").lower():
+                        err_msg = ai_results.get("error", "")
+                        if isinstance(err_msg, dict):
+                            err_msg = err_msg.get("message", str(err_msg))
+                        
+                        if "loading" in err_msg.lower():
                             print(f"Mistral loading, retry {i+1} in 10s...")
                             time.sleep(10)
                             continue
@@ -823,7 +827,7 @@ def call_mistral_inference(prompt: str, max_tokens: int = 600, temperature: floa
     """Calls Mistral-7B-Instruct-v0.2 via HF Inference API Router."""
     headers = {"Authorization": f"Bearer {config.HF_API_TOKEN}"}
     payload = {
-        "model": "mistralai/Mistral-7B-Instruct-v0.2",
+        "model": "mistralai/Mistral-7B-Instruct-v0.3",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": temperature
@@ -855,7 +859,11 @@ def call_mistral_inference(prompt: str, max_tokens: int = 600, temperature: floa
                 return ai_results['choices'][0]['message']['content']
             
             if isinstance(ai_results, dict) and "error" in ai_results:
-                if "loading" in ai_results.get("error", "").lower():
+                err_msg = ai_results.get("error", "")
+                if isinstance(err_msg, dict):
+                    err_msg = err_msg.get("message", str(err_msg))
+
+                if "loading" in err_msg.lower():
                     print(f"Mistral loading, retry {i+1} in 10s...")
                     time.sleep(10)
                     continue
