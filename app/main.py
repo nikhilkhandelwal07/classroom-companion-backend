@@ -23,12 +23,20 @@ except ImportError:
 
 try:
     from .config import config
-    from .sheets import get_sheets_client, get_worksheet, get_students_for_course_division
+    from .sheets import (
+        get_sheets_client, get_worksheet, get_students_for_course_division, 
+        add_session_history, get_session_history, remove_session_history
+    )
+    from . import sheets
     from . import cache
     from . import rag
 except ImportError:
     from config import config
-    from sheets import get_sheets_client, get_worksheet, get_students_for_course_division
+    from sheets import (
+        get_sheets_client, get_worksheet, get_students_for_course_division, 
+        add_session_history, get_session_history, remove_session_history
+    )
+    import sheets
     import cache
     import rag
 
@@ -59,7 +67,7 @@ def custom_openapi():
 app.openapi = custom_openapi
 
 HF_API_URL = "https://router.huggingface.co/hf-inference/models/cardiffnlp/twitter-roberta-base-sentiment-latest"
-MISTRAL_URL = "https://router.huggingface.co/v1/chat/completions"
+LLM_ROUTER_URL = "https://router.huggingface.co/v1/chat/completions"
 # Using the specific HF router URL scheme as requested.
 
 @app.on_event("startup")
@@ -94,6 +102,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         'http://localhost:5173',
+        'http://localhost:5174',
+        'http://127.0.0.1:5173',
+        'http://127.0.0.1:5174',
         'https://classroom-companion-spjimr.vercel.app'
     ],
     allow_credentials=True,
@@ -201,21 +212,61 @@ class UrlRequest(BaseModel):
 class GenerateRequest(BaseModel):
     course_id: str
     division: str
+    session_date: Optional[str] = None
 
 class SessionPlanRequest(BaseModel):
     course_id: str
     division: str
     session_duration: int = 70
+    session_date: Optional[str] = None
 
 class ChatRequest(BaseModel):
     question: str
     course_id: str
     division: str
     history: List[Dict[str, Any]] = []
+    session_date: Optional[str] = None
 
 class ClearRequest(BaseModel):
     course_id: str
     division: str
+
+class ClearSessionRequest(BaseModel):
+    course_id: str
+    division: str
+    session_date: str
+
+class ParticipationGrade(BaseModel):
+    student_id: str
+    score: Optional[int] = None
+    remark: Optional[str] = None
+
+class ParticipationSaveRequest(BaseModel):
+    course_id: str
+    division: str
+    session_date: str
+    grades: List[ParticipationGrade]
+
+class SuggestAnswerRequest(BaseModel):
+    question_id: str
+    question_text: str
+    course_id: str
+    division: str
+
+class PostAnswerRequest(BaseModel):
+    question_id: str
+    faculty_answer: str
+
+class StudentQuestion(BaseModel):
+    course_id: str
+    division: str
+    question: str
+
+class StudentFeedback(BaseModel):
+    course_id: str
+    division: str
+    rating: int # 1-5
+    comment: Optional[str] = ""
 
 @app.post("/refresh-cache")
 async def refresh_all_cache(faculty_email: str = Depends(verify_token)):
@@ -617,6 +668,7 @@ async def get_feedback(course_id: str, division: str, faculty_email: str = Depen
             "neutral_count": 0,
             "negative_count": 0,
             "positive_pct": 0,
+            "neutral_pct": 0,
             "negative_pct": 0,
             "rating_distribution": [
                 {"stars": 5, "count": 0},
@@ -626,6 +678,7 @@ async def get_feedback(course_id: str, division: str, faculty_email: str = Depen
                 {"stars": 1, "count": 0}
             ],
             "avg_rating_pct": 0,
+            "comments": [],
             "ai_analysis": {
                 "summary": "No feedback data available for this session.",
                 "working_well": [],
@@ -638,8 +691,8 @@ async def get_feedback(course_id: str, division: str, faculty_email: str = Depen
         
         # 2. Filter by course and division
         filtered = df_feedback[
-            (df_feedback['course_id'] == course_id) & 
-            (df_feedback['division'] == str(division))
+            (df_feedback['course_id'].astype(str).str.upper().str.strip() == course_id.upper().strip()) & 
+            (df_feedback['division'].astype(str).str.upper().str.strip() == str(division).upper().strip())
         ]
         
         if filtered.empty:
@@ -761,13 +814,13 @@ Respond with exactly this JSON structure (ensure all keys and values are in doub
                     "temperature": 0.3
                 }
                 
-                # Retry mechanism for Mistral as well
+                # Retry mechanism for LLM as well
                 for i in range(3):
-                    res = requests.post(MISTRAL_URL, headers=headers, json=payload, timeout=30)
+                    res = requests.post(LLM_ROUTER_URL, headers=headers, json=payload, timeout=30)
                     ai_results = res.json()
                     
                     # Log to file for remote debugging
-                    log_path = os.path.join(config.BASE_DIR, "mistral_debug.log")
+                    log_path = os.path.join(config.BASE_DIR, "ai_inference_debug.log")
                     with open(log_path, "a") as f:
                         f.write(f"\n--- {time.ctime()} ---\n")
                         f.write(f"Status: {res.status_code}\n")
@@ -779,7 +832,7 @@ Respond with exactly this JSON structure (ensure all keys and values are in doub
                             err_msg = err_msg.get("message", str(err_msg))
                         
                         if "loading" in err_msg.lower():
-                            print(f"Mistral loading, retry {i+1} in 10s...")
+                            print(f"LLM loading, retry {i+1} in 10s...")
                             time.sleep(10)
                             continue
                     
@@ -791,8 +844,8 @@ Respond with exactly this JSON structure (ensure all keys and values are in doub
                             if all(k in ai_analysis for k in ["summary", "working_well", "areas_to_improve"]):
                                 break
                         except Exception as e:
-                            print(f"Mistral JSON parse error in feedback: {e}")
-                            log_path = os.path.join(config.BASE_DIR, "mistral_debug.log")
+                            print(f"LLM JSON parse error in feedback: {e}")
+                            log_path = os.path.join(config.BASE_DIR, "ai_inference_debug.log")
                             with open(log_path, "a") as f:
                                 f.write(f"Parse Error: {str(e)}\nRaw Content: {content}\n")
                     
@@ -823,8 +876,8 @@ Respond with exactly this JSON structure (ensure all keys and values are in doub
             raise e
         raise HTTPException(status_code=500, detail=str(e))
 
-def call_mistral_inference(prompt: str, max_tokens: int = 600, temperature: float = 0.3):
-    """Calls Mistral-7B-Instruct-v0.2 via HF Inference API Router."""
+def call_llm_inference(prompt: str, max_tokens: int = 600, temperature: float = 0.3):
+    """Calls the primary chat model (Llama) via HF Inference API Router."""
     headers = {"Authorization": f"Bearer {config.HF_API_TOKEN}"}
     payload = {
         "model": "meta-llama/Llama-3.1-8B-Instruct",
@@ -835,15 +888,15 @@ def call_mistral_inference(prompt: str, max_tokens: int = 600, temperature: floa
     
     for i in range(3):
         try:
-            res = requests.post(MISTRAL_URL, headers=headers, json=payload, timeout=45)
+            res = requests.post(LLM_ROUTER_URL, headers=headers, json=payload, timeout=45)
             
             # Debugging logs
-            print(f"DEBUG: Mistral Status: {res.status_code}")
+            print(f"DEBUG: LLM Status: {res.status_code}")
             if res.status_code != 200:
-                print(f"DEBUG: Mistral Response Text: {res.text[:500]}")
+                print(f"DEBUG: LLM Response Text: {res.text[:500]}")
             
             if not res.text.strip():
-                print("DEBUG: Mistral returned empty response")
+                print("DEBUG: LLM returned empty response")
                 time.sleep(5)
                 continue
 
@@ -864,12 +917,12 @@ def call_mistral_inference(prompt: str, max_tokens: int = 600, temperature: floa
                     err_msg = err_msg.get("message", str(err_msg))
 
                 if "loading" in err_msg.lower():
-                    print(f"Mistral loading, retry {i+1} in 10s...")
+                    print(f"LLM loading, retry {i+1} in 10s...")
                     time.sleep(10)
                     continue
             break
         except Exception as e:
-            print(f"Mistral call error: {e}")
+            print(f"LLM call error: {e}")
             time.sleep(2)
     return ""
 
@@ -881,11 +934,21 @@ async def upload_material(
     faculty_email: str = Depends(verify_token)
 ):
     total_chunks = 0
+    file_types = []
     # Create course-specific materials directory
     course_materials_path = config.MATERIALS_BASE_PATH / f"{course_id}_{division}"
     course_materials_path.mkdir(parents=True, exist_ok=True)
     
+    # Valid extensions
+    valid_extensions = ['.pdf', '.pptx', '.ppt', '.docx', '.doc']
+    
     for file in files:
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in valid_extensions:
+            raise HTTPException(status_code=400, detail="Unsupported file type")
+            
+        file_types.append(ext.replace('.', ''))
+            
         contents = await file.read()
         target_path = course_materials_path / file.filename
         
@@ -895,7 +958,7 @@ async def upload_material(
             
         try:
             # Delegate to rag.py for all processing and indexing
-            chunks_added = rag.process_pdf(str(target_path), course_id, division)
+            chunks_added = rag.process_document(str(target_path), course_id, division)
             total_chunks += chunks_added
         except Exception as e:
             print(f"Error processing {file.filename}: {e}")
@@ -903,25 +966,43 @@ async def upload_material(
                 target_path.unlink()
             raise HTTPException(status_code=500, detail=f"Failed to process {file.filename}: {str(e)}")
         
+    import datetime
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    filenames = ", ".join([f.filename for f in files])
+    add_session_history(course_id, division, today_str, filenames, 0)
+    cache.refresh_cache("SessionHistory")
+        
     return {
         'status': 'success',
         'chunks_added': total_chunks,
-        'files_processed': len(files)
+        'files_processed': len(files),
+        'file_type': file_types
     }
 
 @app.post("/add-url")
 async def add_url(request: UrlRequest, faculty_email: str = Depends(verify_token)):
     try:
         chunks = rag.process_url(request.url, request.course_id, request.division)
+        
+        import datetime
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        add_session_history(request.course_id, request.division, today_str, "", 1)
+        cache.refresh_cache("SessionHistory")
+        
         return {"success": True, "message": f"URL processed, added {chunks} chunks."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/generate-summary")
 async def generate_summary(request: GenerateRequest, faculty_email: str = Depends(verify_token)):
-    context = rag.get_context(request.course_id, request.division, query="Executive summary, key concepts, and main topics of the course material", n_results=10)
+    context = rag.get_context_filtered(
+        request.course_id, 
+        request.division, 
+        query="Executive summary, key concepts, and main topics of the course material",
+        session_date=request.session_date
+    )
     if not context:
-        raise HTTPException(status_code=404, detail="No material found for this course/division. Please upload documents or add URLs first.")
+        raise HTTPException(status_code=404, detail="No material found for this course/division or session date.")
         
     print(f"DEBUG: Context for summary (first 200 chars): {str(context)[:200]}")
     
@@ -957,7 +1038,7 @@ Required JSON Structure:
   "discussion_prompts": ["prompt 1", "prompt 2", "prompt 3", "prompt 4"]
 }}"""
     
-    content = call_mistral_inference(prompt, max_tokens=1500)
+    content = call_llm_inference(prompt, max_tokens=1500)
     if content:
         try:
             return extract_json_safe(content)
@@ -967,9 +1048,14 @@ Required JSON Structure:
 
 @app.post("/generate-session-plan")
 async def generate_session_plan(request: SessionPlanRequest, faculty_email: str = Depends(verify_token)):
-    context = rag.get_context(request.course_id, request.division, query="Detailed session plan structure, activities, and timing", n_results=15)
+    context = rag.get_context_filtered(
+        request.course_id, 
+        request.division, 
+        query="Detailed session plan structure, activities, and timing",
+        session_date=request.session_date
+    )
     if not context:
-        raise HTTPException(status_code=404, detail="No material found for this course/division. Please upload documents or add URLs first.")
+        raise HTTPException(status_code=404, detail="No material found for this course/division or session date.")
         
     print(f"DEBUG: Context for session plan (first 200 chars): {str(context)[:200]}")
     
@@ -1011,7 +1097,7 @@ Constraint:
 - No conversational text, no markdown code blocks, no preamble.
 """
     
-    content = call_mistral_inference(prompt, max_tokens=2000)
+    content = call_llm_inference(prompt, max_tokens=2000)
     if content:
         try:
             return extract_json_safe(content)
@@ -1021,7 +1107,13 @@ Constraint:
 
 @app.post("/chat")
 async def chat_with_material(request: ChatRequest, faculty_email: str = Depends(verify_token)):
-    context = rag.get_context(request.course_id, request.division, query=request.question, n_results=5)
+    context = rag.get_context_filtered(
+        request.course_id, 
+        request.division, 
+        query=request.question, 
+        session_date=request.session_date, 
+        max_chars=12000
+    )
     if not context:
         context = "No relevant material found."
         
@@ -1043,7 +1135,7 @@ History:
 Question: {request.question}
 Answer:"""
     
-    content = call_mistral_inference(prompt)
+    content = call_llm_inference(prompt)
     return {"answer": content if content else "I'm sorry, I couldn't find an answer in the provided material."}
 
 @app.post("/clear-material")
@@ -1068,6 +1160,516 @@ async def clear_all(faculty_email: str = Depends(verify_token)):
     try:
         rag.clear_all_materials()
         return {"success": True, "message": "All materials cleared."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/session-history")
+async def get_history(course_id: str, division: str, faculty_email: str = Depends(verify_token)):
+    try:
+        df_history = cache.get_df("SessionHistory")
+        if df_history.empty:
+            return {"data": []}
+            
+        records = df_history.to_dict('records')
+        
+        filtered_records = []
+        for r in records:
+            r_cid = str(r.get('course_id', '')).lower().strip()
+            r_div = str(r.get('division', '')).lower().strip()
+            target_cid = str(course_id).lower().strip()
+            target_div = str(division).lower().strip()
+            
+            if (r_cid == target_cid) and (r_div == target_div):
+                filtered_records.append(r)
+            
+        # Sort descending by session_date if column exists
+        if filtered_records and 'session_date' in filtered_records[0]:
+            filtered_records.sort(key=lambda x: str(x['session_date']), reverse=True)
+            
+        return {"data": filtered_records}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/participation")
+async def get_participation(course_id: str, division: str, session_date: str, faculty_email: str = Depends(verify_token)):
+    try:
+        # 1. Get Log and Students
+        df_participation = cache.get_df("Participation")
+        df_enrollment = cache.get_df("Enrollment")
+        df_students = cache.get_df("Students")
+
+        if df_students.empty or df_enrollment.empty:
+            raise HTTPException(status_code=500, detail="Student data not loaded.")
+
+        # 2. Filter Enrolled Students
+        enrolled = pd.DataFrame()
+        if not df_enrollment.empty and 'course_id' in df_enrollment.columns and 'division' in df_enrollment.columns:
+            enrolled = df_enrollment[
+                (df_enrollment['course_id'].astype(str) == str(course_id)) & 
+                (df_enrollment['division'].astype(str) == str(division))
+            ]
+        
+        if enrolled.empty:
+            return {"students": []}
+        
+        enrolled_students = pd.DataFrame()
+        if not df_students.empty and 'student_id' in df_students.columns and 'student_name' in df_students.columns:
+            enrolled_students = pd.merge(
+                enrolled, 
+                df_students[['student_id', 'student_name']], 
+                on='student_id', 
+                how='inner' # Only show students with names
+            )
+
+        if enrolled_students.empty:
+            return {"students": []}
+        
+        # 3. Get Scores and Remarks for this session
+        session_data_map = {} # sid -> {score, remark}
+        if not df_participation.empty and 'course_id' in df_participation.columns:
+            try:
+                current_session = df_participation[
+                    (df_participation['course_id'].astype(str) == str(course_id)) &
+                    (df_participation['division'].astype(str) == str(division)) &
+                    (df_participation['session_date'].astype(str) == str(session_date))
+                ]
+                for _, row in current_session.iterrows():
+                    try:
+                        sid = str(row['student_id'])
+                        session_data_map[sid] = {
+                            "score": int(row['score']) if 'score' in row and pd.notnull(row['score']) else None,
+                            "remark": str(row['remark']) if 'remark' in row and pd.notnull(row['remark']) else ""
+                        }
+                    except:
+                        pass
+            except Exception as e:
+                print(f"Error filtering session data: {e}")
+
+        # 4. Calculate Cumulative Avg for all students in this course
+        # Filter participation for THIS course across ALL dates
+        all_course_scores = pd.DataFrame()
+        if not df_participation.empty and 'course_id' in df_participation.columns:
+            all_course_scores = df_participation[df_participation['course_id'].astype(str) == str(course_id)]
+        
+        results = []
+        for _, student in enrolled_students.iterrows():
+            sid = str(student['student_id'])
+            
+            # Find cumulative avg
+            avg = None
+            if not all_course_scores.empty and 'student_id' in all_course_scores.columns:
+                s_scores = all_course_scores[all_course_scores['student_id'].astype(str) == sid]
+                if not s_scores.empty and 'score' in s_scores.columns:
+                    # Ensure scores are numeric
+                    valid_scores = pd.to_numeric(s_scores['score'], errors='coerce').dropna()
+                    if not valid_scores.empty:
+                        avg = round(float(valid_scores.mean()), 1)
+
+            student_session = session_data_map.get(sid, {})
+            results.append({
+                "student_id": sid,
+                "student_name": student['student_name'],
+                "score": student_session.get("score"),
+                "remark": student_session.get("remark", ""),
+                "cumulative_avg": avg
+            })
+
+        return {"students": results}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/participation")
+async def save_participation(request: ParticipationSaveRequest, faculty_email: str = Depends(verify_token)):
+    try:
+        headers = ['student_id', 'student_name', 'course_id', 'division', 'session_date', 'score', 'remark']
+        ws = sheets.get_worksheet(config.GOOGLE_SHEET_ID, 'Participation', headers=headers)
+        all_values = ws.get_all_values()
+        
+        # Headers check (redundant but safe)
+        if not all_values:
+            ws.append_row(headers)
+            all_values = [headers]
+        
+        headers = [h.lower().strip() for h in all_values[0]]
+        
+        try:
+            sid_idx = headers.index('student_id')
+            cid_idx = headers.index('course_id')
+            div_idx = headers.index('division')
+            date_idx = headers.index('session_date')
+            score_idx = headers.index('score')
+            remark_idx = headers.index('remark') if 'remark' in headers else -1
+            # student_name is optional
+            name_idx = headers.index('student_name') if 'student_name' in headers else -1
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=f"Missing required columns in Participation sheet: {ve}")
+        
+        # Prepare lookup map to check existing rows
+        # composite key: sid + course + div + date
+        row_map = {}
+        for i, row in enumerate(all_values):
+            if i == 0: continue
+            key = f"{row[sid_idx]}_{row[cid_idx]}_{row[div_idx]}_{row[date_idx]}"
+            row_map[key] = i + 1 # 1-indexed row number
+
+        saved_count = 0
+        
+        for grade in request.grades:
+            if grade.score is None: continue
+            
+            student_id = str(grade.student_id)
+            score = grade.score
+            key = f"{student_id}_{request.course_id}_{request.division}_{request.session_date}"
+            
+            existing_row_idx = row_map.get(key, -1)
+            
+            if existing_row_idx != -1:
+                ws.update_cell(existing_row_idx, score_idx + 1, grade.score)
+                if remark_idx != -1:
+                    ws.update_cell(existing_row_idx, remark_idx + 1, grade.remark or "")
+            else:
+                new_row = [""] * len(headers)
+                new_row[sid_idx] = student_id
+                if name_idx != -1:
+                    df_students = cache.get_df("Students")
+                    student_row = df_students[df_students['student_id'].astype(str) == str(student_id)]
+                    name = student_row['student_name'].iloc[0] if not student_row.empty else "Unknown"
+                    new_row[name_idx] = name
+                new_row[cid_idx] = request.course_id.upper()
+                new_row[div_idx] = request.division.upper()
+                new_row[date_idx] = request.session_date
+                new_row[score_idx] = grade.score
+                if remark_idx != -1:
+                    new_row[remark_idx] = grade.remark or ""
+                ws.append_row(new_row)
+            saved_count += 1
+
+        # Invalidate cache
+        cache.refresh_cache("Participation")
+        return {"saved": saved_count}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/participation-summary")
+async def get_participation_summary(course_id: str, division: str, faculty_email: str = Depends(verify_token)):
+    try:
+        df_participation = cache.get_df("Participation")
+        df_enrollment = cache.get_df("Enrollment")
+        df_students = cache.get_df("Students")
+
+        if df_enrollment.empty or df_students.empty:
+             return {"students": []}
+
+        # Filter enrolled
+        enrolled = df_enrollment[
+            (df_enrollment['course_id'].astype(str) == str(course_id)) & 
+            (df_enrollment['division'].astype(str) == str(division))
+        ]
+        
+        enrolled_students = pd.merge(
+            enrolled, 
+            df_students[['student_id', 'student_name']], 
+            on='student_id', 
+            how='inner'
+        )
+
+        all_course_scores = pd.DataFrame()
+        if not df_participation.empty and 'course_id' in df_participation.columns:
+            all_course_scores = df_participation[df_participation['course_id'].astype(str) == str(course_id)]
+
+        results = []
+        for _, student in enrolled_students.iterrows():
+            sid = str(student['student_id'])
+            s_scores = pd.DataFrame()
+            if not all_course_scores.empty and 'student_id' in all_course_scores.columns:
+                s_scores = all_course_scores[all_course_scores['student_id'].astype(str) == sid]
+            
+            avg = None
+            count = 0
+            if not s_scores.empty and 'score' in s_scores.columns:
+                valid_scores = pd.to_numeric(s_scores['score'], errors='coerce').dropna()
+                if not valid_scores.empty:
+                    avg = round(float(valid_scores.mean()), 1)
+                    count = len(valid_scores)
+
+            results.append({
+                "student_id": sid,
+                "student_name": student['student_name'],
+                "cumulative_avg": avg,
+                "sessions_graded": count
+            })
+
+        return {"students": sorted(results, key=lambda x: x['student_name'])}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/questions")
+async def get_questions(course_id: str, division: str, status: str = "all", faculty_email: str = Depends(verify_token)):
+    try:
+        df_questions = cache.get_df("Questions")
+        if df_questions.empty:
+            return {"questions": []}
+
+        # Filter by course and division
+        filtered = df_questions[
+            (df_questions['course_id'].astype(str).str.lower() == str(course_id).lower()) &
+            (df_questions['division'].astype(str).str.lower() == str(division).lower())
+        ]
+
+        if filtered.empty:
+            return {
+                "questions": [],
+                "counts": {"all": 0, "unanswered": 0, "answered": 0}
+            }
+
+        # Calculate counts BEFORE filtering by status
+        all_counts = {
+            "all": len(filtered),
+            "unanswered": len(filtered[filtered['status'].astype(str).str.lower() == "unanswered"]),
+            "answered": len(filtered[filtered['status'].astype(str).str.lower() == "answered"])
+        }
+
+        # Filter by status if not "all"
+        if status.lower() != "all":
+            filtered = filtered[filtered['status'].astype(str).str.lower() == status.lower()]
+
+        # Sort by asked_at descending
+        if 'asked_at' in filtered.columns:
+            filtered['asked_at_dt'] = pd.to_datetime(filtered['asked_at'], errors='coerce')
+            filtered = filtered.sort_values(by='asked_at_dt', ascending=False)
+
+        # Convert to list of dicts
+        questions = []
+        for _, row in filtered.iterrows():
+            q = {k: (v if pd.notnull(v) else "") for k, v in row.to_dict().items() if k != 'asked_at_dt'}
+            if 'question_text' not in q and 'question' in q:
+                q['question_text'] = q['question']
+            questions.append(q)
+
+        return {
+            "questions": questions,
+            "counts": all_counts
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/student-question")
+async def post_student_question(request: StudentQuestion):
+    # Public endpoint - no auth required
+    try:
+        from datetime import datetime
+        question_id = str(uuid.uuid4())
+        now_str = datetime.now().isoformat()
+        
+        headers = ['question_id', 'course_id', 'division', 'question_text', 'status', 'asked_at', 'ai_suggestion', 'faculty_answer', 'answered_at']
+        ws = sheets.get_worksheet(config.GOOGLE_SHEET_ID, 'Questions', headers=headers)
+        try:
+            actual_headers = ws.row_values(1)
+        except Exception:
+            actual_headers = headers
+            
+        if not actual_headers:
+            actual_headers = headers
+
+        row_dict = {
+            'question_id': question_id,
+            'course_id': request.course_id.upper(),
+            'division': request.division.upper(),
+            'question': request.question,
+            'question_text': request.question,
+            'status': 'unanswered',
+            'asked_at': now_str,
+            'ai_suggestion': '',
+            'faculty_answer': '',
+            'answered_at': ''
+        }
+        
+        new_row = [row_dict.get(str(h).lower().strip(), "") for h in actual_headers]
+        
+        ws.append_row(new_row)
+        cache.refresh_cache("Questions") # Refresh to pick up the new question
+        
+        return {"question_id": question_id, "message": "Your question has been submitted successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/student-questions")
+async def get_student_questions(course_id: str, division: str):
+    # Public endpoint - no auth required
+    try:
+        df_questions = cache.get_df("Questions")
+        if df_questions.empty:
+            return {"questions": []}
+            
+        # Filter for answered questions for this course + division
+        df_filtered = df_questions[
+            (df_questions['course_id'].astype(str).str.upper() == course_id.upper()) &
+            (df_questions['division'].astype(str).str.upper() == division.upper()) &
+            (df_questions['status'].astype(str).str.lower() == "answered")
+        ]
+        
+        # Return only required fields
+        results = []
+        for _, row in df_filtered.iterrows():
+            results.append({
+                "question": row.get("question_text", ""),
+                "faculty_answer": row.get("faculty_answer", "")
+            })
+            
+        return {"questions": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/student-feedback")
+async def post_student_feedback(request: StudentFeedback):
+    # Public endpoint - no auth required
+    try:
+        from datetime import datetime
+        now_str = datetime.now().isoformat()
+        
+        headers = ['course_id', 'division', 'rating', 'comment', 'date']
+        ws = sheets.get_worksheet(config.GOOGLE_SHEET_ID, 'Feedback', headers=headers)
+        
+        row = [
+            request.course_id.upper(),
+            request.division.upper(),
+            request.rating,
+            request.comment,
+            now_str
+        ]
+        
+        ws.append_row(row)
+        # We don't necessarily need to refresh cache for feedback unless faculty views it in-app
+        # But for consistency:
+        cache.refresh_cache("Feedback")
+        
+        return {"message": "Thank you for your feedback"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/suggest-answer")
+async def suggest_answer(request: SuggestAnswerRequest, faculty_email: str = Depends(verify_token)):
+    try:
+        # 1. RAG Retrieval
+        vector_store = rag.get_vector_store(request.course_id, request.division)
+        
+        used_material = False
+        if vector_store:
+            # Material exists — answer from RAG context
+            context = rag.get_all_context(request.course_id, request.division, request.question_text)
+            used_material = True
+            system_prompt = "You are a helpful teaching assistant for a business school course. Answer based ONLY on the provided course material. Be clear and helpful. If the answer is not covered in the material, say so explicitly. Keep it concise."
+            user_prompt = f"Material: {context[:6000]}\n\nStudent Question: {request.question_text}"
+        else:
+            # No material uploaded — answer from general knowledge but be transparent
+            used_material = False
+            system_prompt = "You are a helpful teaching assistant for a business school course. No course material has been uploaded yet, so answer from general business school knowledge. Be helpful but mention that this answer is based on general knowledge, not specific course material. Keep it concise."
+            user_prompt = f"Student Question: {request.question_text}"
+        
+        headers = {
+            "Authorization": f"Bearer {config.HF_API_TOKEN}",
+            "Content-Type": "application/json",
+            "x-use-cache": "false"
+        }
+        
+        payload = {
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "max_tokens": 1000,
+            "temperature": 0.3
+        }
+
+        print(f"DEBUG: Calling LLM for suggestion for question {request.question_id} (used_material={used_material})")
+        response = requests.post(LLM_ROUTER_URL, headers=headers, json=payload, timeout=60)
+        
+        if response.status_code != 200:
+            print(f"Error from HF: {response.status_code} - {response.text}")
+            raise HTTPException(status_code=502, detail="Failed to get AI suggestion from LLM")
+            
+        data = response.json()
+        ai_suggestion = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+
+        # 3. Save suggestion to Sheet
+        if ai_suggestion:
+            ws = sheets.get_worksheet(config.GOOGLE_SHEET_ID, 'Questions')
+            all_records = ws.get_all_records()
+            
+            # Find row index (1-based, +1 for header)
+            row_idx = -1
+            for i, record in enumerate(all_records):
+                if str(record.get('question_id')) == str(request.question_id):
+                    row_idx = i + 2
+                    break
+                    
+            if row_idx != -1:
+                # Find column index for ai_suggestion
+                sheet_headers = ws.row_values(1)
+                try:
+                    col_idx = sheet_headers.index('ai_suggestion') + 1
+                    ws.update_cell(row_idx, col_idx, ai_suggestion)
+                    cache.refresh_cache("Questions") # Refresh to show suggestion in UI
+                except ValueError:
+                    print("Error: 'ai_suggestion' column not found in Questions sheet.")
+            else:
+                print(f"Error: Question ID {request.question_id} not found in sheet to update suggestion.")
+
+        return {"ai_suggestion": ai_suggestion, "used_material": used_material}
+
+    except Exception as e:
+        print(f"DEBUG Suggest Answer Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/post-answer")
+async def post_answer(request: PostAnswerRequest, faculty_email: str = Depends(verify_token)):
+    try:
+        from datetime import datetime
+        ws = sheets.get_worksheet(config.GOOGLE_SHEET_ID, 'Questions')
+        all_records = ws.get_all_records()
+        headers = [h.lower().strip() for h in ws.row_values(1)]
+        
+        try:
+            answer_col_idx = headers.index('faculty_answer') + 1
+            status_col_idx = headers.index('status') + 1
+            answered_col_idx = headers.index('answered_at') + 1
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=f"Missing column in Questions sheet: {ve}")
+
+        row_idx = -1
+        for i, record in enumerate(all_records):
+            if str(record.get('question_id')) == str(request.question_id):
+                row_idx = i + 2 # 1-based index, +1 for header
+                break
+                
+        if row_idx == -1:
+             raise HTTPException(status_code=404, detail="Question not found")
+
+        # Update cells in a single batch request if possible, but gspread update_cell is easiest here
+        now_str = datetime.now().isoformat()
+        
+        # We could use update_cells for efficiency, but let's stick to update_cell for simplicity unless it's too slow
+        ws.update_cell(row_idx, answer_col_idx, request.faculty_answer)
+        ws.update_cell(row_idx, status_col_idx, "answered")
+        ws.update_cell(row_idx, answered_col_idx, now_str)
+
+        cache.refresh_cache("Questions")
+        return {"success": True, "message": "Answer posted successfully"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Participation summary error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/clear-session")
+async def clear_session(request: ClearSessionRequest, faculty_email: str = Depends(verify_token)):
+    try:
+        removed_chunks = rag.remove_session_date(request.course_id, request.division, request.session_date)
+        remove_session_history(request.course_id, request.division, request.session_date)
+        return {"success": True, "message": f"Cleared session {request.session_date}. Removed {removed_chunks} chunks."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

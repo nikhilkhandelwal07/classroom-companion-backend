@@ -18,5 +18,6 @@ class Config:
     GMAIL_USER = os.getenv("GMAIL_USER")
     GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
     MATERIALS_BASE_PATH = BASE_DIR / "data" / "materials"
+    FAISS_DB_PATH = BASE_DIR / "faiss_db"
 
 config = Config()
