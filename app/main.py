@@ -208,6 +208,7 @@ class UrlRequest(BaseModel):
     url: str
     course_id: str
     division: str
+    session_date: Optional[str] = None
 
 class GenerateRequest(BaseModel):
     course_id: str
@@ -931,6 +932,7 @@ async def upload_material(
     files: List[UploadFile] = File(...),
     course_id: str = Form(...),
     division: str = Form(...),
+    session_date: Optional[str] = Form(None),
     faculty_email: str = Depends(verify_token)
 ):
     total_chunks = 0
@@ -958,7 +960,7 @@ async def upload_material(
             
         try:
             # Delegate to rag.py for all processing and indexing
-            chunks_added = rag.process_document(str(target_path), course_id, division)
+            chunks_added = rag.process_document(str(target_path), course_id, division, session_date)
             total_chunks += chunks_added
         except Exception as e:
             print(f"Error processing {file.filename}: {e}")
@@ -967,9 +969,9 @@ async def upload_material(
             raise HTTPException(status_code=500, detail=f"Failed to process {file.filename}: {str(e)}")
         
     import datetime
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    target_session_date = session_date if session_date else datetime.date.today().strftime("%Y-%m-%d")
     filenames = ", ".join([f.filename for f in files])
-    add_session_history(course_id, division, today_str, filenames, 0)
+    add_session_history(course_id, division, target_session_date, filenames, 0)
     cache.refresh_cache("SessionHistory")
         
     return {
@@ -982,11 +984,11 @@ async def upload_material(
 @app.post("/add-url")
 async def add_url(request: UrlRequest, faculty_email: str = Depends(verify_token)):
     try:
-        chunks = rag.process_url(request.url, request.course_id, request.division)
-        
         import datetime
-        today_str = datetime.date.today().strftime("%Y-%m-%d")
-        add_session_history(request.course_id, request.division, today_str, "", 1)
+        target_session_date = request.session_date if request.session_date else datetime.date.today().strftime("%Y-%m-%d")
+        rag.process_url(request.url, request.course_id, request.division, target_session_date)
+        
+        add_session_history(request.course_id, request.division, target_session_date, "", 1)
         cache.refresh_cache("SessionHistory")
         
         return {"success": True, "message": f"URL processed, added {chunks} chunks."}
@@ -996,8 +998,8 @@ async def add_url(request: UrlRequest, faculty_email: str = Depends(verify_token
 @app.post("/generate-summary")
 async def generate_summary(request: GenerateRequest, faculty_email: str = Depends(verify_token)):
     context = rag.get_context_filtered(
-        request.course_id, 
-        request.division, 
+        request.course_id.strip().upper(), 
+        request.division.strip().upper(), 
         query="Executive summary, key concepts, and main topics of the course material",
         session_date=request.session_date
     )
@@ -1049,8 +1051,8 @@ Required JSON Structure:
 @app.post("/generate-session-plan")
 async def generate_session_plan(request: SessionPlanRequest, faculty_email: str = Depends(verify_token)):
     context = rag.get_context_filtered(
-        request.course_id, 
-        request.division, 
+        request.course_id.strip().upper(), 
+        request.division.strip().upper(), 
         query="Detailed session plan structure, activities, and timing",
         session_date=request.session_date
     )
@@ -1108,8 +1110,8 @@ Constraint:
 @app.post("/chat")
 async def chat_with_material(request: ChatRequest, faculty_email: str = Depends(verify_token)):
     context = rag.get_context_filtered(
-        request.course_id, 
-        request.division, 
+        request.course_id.strip().upper(), 
+        request.division.strip().upper(), 
         query=request.question, 
         session_date=request.session_date, 
         max_chars=12000
@@ -1542,9 +1544,6 @@ async def post_student_feedback(request: StudentFeedback):
         
         ws.append_row(row)
         # We don't necessarily need to refresh cache for feedback unless faculty views it in-app
-        # But for consistency:
-        cache.refresh_cache("Feedback")
-        
         return {"message": "Thank you for your feedback"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1552,49 +1551,69 @@ async def post_student_feedback(request: StudentFeedback):
 @app.post("/suggest-answer")
 async def suggest_answer(request: SuggestAnswerRequest, faculty_email: str = Depends(verify_token)):
     try:
-        # 1. RAG Retrieval
-        vector_store = rag.get_vector_store(request.course_id, request.division)
+        # Step 1 — Retrieve context
+        cid = request.course_id.strip().upper()
+        div = request.division.strip().upper()
+        vector_store = rag.get_vector_store(cid, div)
         
-        used_material = False
+        context = ""
         if vector_store:
-            # Material exists — answer from RAG context
-            context = rag.get_all_context(request.course_id, request.division, request.question_text)
-            used_material = True
-            system_prompt = "You are a helpful teaching assistant for a business school course. Answer based ONLY on the provided course material. Be clear and helpful. If the answer is not covered in the material, say so explicitly. Keep it concise."
-            user_prompt = f"Material: {context[:6000]}\n\nStudent Question: {request.question_text}"
+            try:
+                # Get small focused context for LLM to assess
+                results = vector_store.similarity_search(request.question_text, k=5)
+                context = "\n\n".join([doc.page_content for doc in results])
+            except Exception as e:
+                print(f"DEBUG: Similarity search failed: {e}")
+                context = ""
+
+        # Step 2 — Build prompt that lets LLM decide
+        if context:
+            prompt = f"""You are a teaching assistant for a business school course.
+A student asked: {request.question_text}
+
+Here is the relevant course material that was retrieved:
+\"\"\"
+{context[:6000]}
+\"\"\"
+
+Instructions:
+- Assess if the retrieved material contains the core concepts or keywords needed to answer the question.
+- If the material explains, defines, or even mentions the relevant business frameworks/concepts asked, you MUST use it.
+- If YES (relevant material found): Answer using the material as your primary source. Start your response PRECISELY with [FROM COURSE MATERIAL]
+- If NO (material is completely unrelated or empty): Answer from general business knowledge. Start your response PRECISELY with [GENERAL KNOWLEDGE - not specific to course material]
+- IMPORTANT: If you use the material, do NOT start your answer with disclaimers like "The material does not directly answer...". Just provide the answer.
+- Be concise, clear and student-friendly.
+- Never make up facts."""
         else:
-            # No material uploaded — answer from general knowledge but be transparent
-            used_material = False
-            system_prompt = "You are a helpful teaching assistant for a business school course. No course material has been uploaded yet, so answer from general business school knowledge. Be helpful but mention that this answer is based on general knowledge, not specific course material. Keep it concise."
-            user_prompt = f"Student Question: {request.question_text}"
-        
-        headers = {
-            "Authorization": f"Bearer {config.HF_API_TOKEN}",
-            "Content-Type": "application/json",
-            "x-use-cache": "false"
-        }
-        
-        payload = {
-            "model": "meta-llama/Llama-3.1-8B-Instruct",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "max_tokens": 1000,
-            "temperature": 0.3
-        }
+            prompt = f"""You are a teaching assistant for a business school course.
+No course material has been uploaded yet for this course.
+Answer this student question from general business school knowledge.
+Start your response PRECISELY with [GENERAL KNOWLEDGE - no course material uploaded]
 
-        print(f"DEBUG: Calling LLM for suggestion for question {request.question_id} (used_material={used_material})")
-        response = requests.post(LLM_ROUTER_URL, headers=headers, json=payload, timeout=60)
-        
-        if response.status_code != 200:
-            print(f"Error from HF: {response.status_code} - {response.text}")
-            raise HTTPException(status_code=502, detail="Failed to get AI suggestion from LLM")
-            
-        data = response.json()
-        ai_suggestion = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+Question: {request.question_text}"""
 
-        # 3. Save suggestion to Sheet
+        # Step 3 — Call LLM
+        print(f"DEBUG: Calling LLM for conditional suggestion (context_length={len(context)})")
+        answer = call_llm_inference(prompt, max_tokens=1000, temperature=0.3)
+        
+        if not answer:
+             raise HTTPException(status_code=502, detail="Failed to get AI suggestion from LLM")
+
+        # Step 4 — Detect which mode was used
+        used_material = "[FROM COURSE MATERIAL]" in answer[:50]
+        
+        # Step 5 — Clean the prefix from the answer before saving
+        prefixes = [
+            "[FROM COURSE MATERIAL]", 
+            "[GENERAL KNOWLEDGE - not specific to course material]", 
+            "[GENERAL KNOWLEDGE - no course material uploaded]"
+        ]
+        ai_suggestion = answer
+        for p in prefixes:
+            ai_suggestion = ai_suggestion.replace(p, "")
+        ai_suggestion = ai_suggestion.strip()
+
+        # Step 6 — Save suggestion to Sheet
         if ai_suggestion:
             ws = sheets.get_worksheet(config.GOOGLE_SHEET_ID, 'Questions')
             all_records = ws.get_all_records()
@@ -1610,15 +1629,28 @@ async def suggest_answer(request: SuggestAnswerRequest, faculty_email: str = Dep
                 # Find column index for ai_suggestion
                 sheet_headers = ws.row_values(1)
                 try:
-                    col_idx = sheet_headers.index('ai_suggestion') + 1
-                    ws.update_cell(row_idx, col_idx, ai_suggestion)
+                    # Update ai_suggestion
+                    suggestion_col_idx = sheet_headers.index('ai_suggestion') + 1
+                    ws.update_cell(row_idx, suggestion_col_idx, ai_suggestion)
+                    
+                    # Also update used_material in sheet if column exists
+                    try:
+                        used_mat_col_idx = sheet_headers.index('used_material') + 1
+                        ws.update_cell(row_idx, used_mat_col_idx, "YES" if used_material else "NO")
+                    except ValueError:
+                        pass # Column doesn't exist, ignore
+                        
                     cache.refresh_cache("Questions") # Refresh to show suggestion in UI
                 except ValueError:
                     print("Error: 'ai_suggestion' column not found in Questions sheet.")
             else:
                 print(f"Error: Question ID {request.question_id} not found in sheet to update suggestion.")
 
-        return {"ai_suggestion": ai_suggestion, "used_material": used_material}
+        return {
+            "ai_suggestion": ai_suggestion, 
+            "used_material": used_material, 
+            "has_context": bool(context)
+        }
 
     except Exception as e:
         print(f"DEBUG Suggest Answer Error: {str(e)}")

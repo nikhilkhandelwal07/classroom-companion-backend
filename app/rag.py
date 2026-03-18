@@ -21,6 +21,8 @@ except ImportError:
 # Global dictionary to store FAISS index objects in memory keyed by course_id_division
 faiss_indexes: Dict[str, FAISS] = {}
 
+FAISS_BASE_PATH = config.FAISS_DB_PATH
+
 # Initialize Local Embeddings
 embeddings = HuggingFaceEmbeddings(
     model_name='sentence-transformers/all-MiniLM-L6-v2'
@@ -31,27 +33,41 @@ text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 
 def get_index_path(course_id: str, division: str):
     """Returns the persistent folder path for this course and division's FAISS index."""
+    cid = str(course_id).strip().upper()
+    div = str(division).strip().upper()
     os.makedirs(config.FAISS_DB_PATH, exist_ok=True)
-    return config.FAISS_DB_PATH / f"{course_id}_{division}"
+    return config.FAISS_DB_PATH / f"{cid}_{div}"
 
 def get_vector_store(course_id: str, division: str):
     """Returns FAISS index from memory Cache or loads from Disk."""
-    key = f"{course_id}_{division}"
+    cid = str(course_id).strip().upper()
+    div = str(division).strip().upper()
+    key = f"{cid}_{div}"
     
     # Check memory cache first
-    if key in faiss_indexes:
+    if key in faiss_indexes and faiss_indexes[key] is not None:
         return faiss_indexes[key]
         
     # Check disk
-    index_path = get_index_path(course_id, division)
-    if os.path.exists(os.path.join(index_path, "index.faiss")):
+    path = os.path.join(FAISS_BASE_PATH, key)
+    index_file = os.path.join(path, "index.faiss")
+    
+    print(f"DEBUG: Checking for FAISS index at {path} (key: {key})")
+    
+    if os.path.exists(index_file):
         try:
-            vector_store = FAISS.load_local(str(index_path), embeddings, allow_dangerous_deserialization=True)
+            vector_store = FAISS.load_local(
+                path, 
+                embeddings, 
+                allow_dangerous_deserialization=True
+            )
             faiss_indexes[key] = vector_store
+            print(f"DEBUG: Successfully loaded FAISS index for {key} from disk")
             return vector_store
         except Exception as e:
-            print(f"Failed to load FAISS index from disk: {e}")
+            print(f"ERROR: Failed to load FAISS index for {key} from disk: {e}")
             
+    print(f"DEBUG: No FAISS index found on disk for {key}")
     return None
 
 def load_document(file_path: str, filename: str) -> List[Document]:
@@ -90,42 +106,51 @@ def load_document(file_path: str, filename: str) -> List[Document]:
     else:
         raise ValueError(f"Unsupported file type: {ext}")
 
-def process_document(file_path: str, course_id: str, division: str):
+def process_document(file_path: str, course_id: str, division: str, session_date: Optional[str] = None):
     """Loads a Document, chunks it, and adds to FAISS index for course+division."""
     import datetime
+    # Normalize inputs immediately
+    cid = str(course_id).strip().upper()
+    div = str(division).strip().upper()
+    key = f"{cid}_{div}"
+
     filename = os.path.basename(file_path)
     docs = load_document(file_path, filename)
     if not docs:
         return 0
     chunks = text_splitter.split_documents(docs)
     
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    today_str = session_date if session_date else datetime.date.today().strftime("%Y-%m-%d")
     
     # Add metadata
     for chunk in chunks:
         # Don't overwrite type if docx or pptx
-        meta = {"course_id": course_id, "division": division, "source": filename, "session_date": today_str}
+        meta = {"course_id": cid, "division": div, "source": filename, "session_date": today_str}
         if "type" not in chunk.metadata:
             meta["type"] = "pdf"
         chunk.metadata.update(meta)
     
-    vector_store = get_vector_store(course_id, division)
+    vector_store = get_vector_store(cid, div)
     if vector_store:
         vector_store.add_documents(chunks)
     else:
         vector_store = FAISS.from_documents(chunks, embeddings)
         
     # Save to disk
-    vector_store.save_local(str(get_index_path(course_id, division)))
+    vector_store.save_local(str(get_index_path(cid, div)))
     
     # Update cache
-    key = f"{course_id}_{division}"
     faiss_indexes[key] = vector_store
     
     return len(chunks)
 
-def process_url(url: str, course_id: str, division: str):
+def process_url(url: str, course_id: str, division: str, session_date: Optional[str] = None):
     """Scrapes a URL, chunks it, and adds to FAISS index for course+division."""
+    # Normalize inputs immediately
+    cid = str(course_id).strip().upper()
+    div = str(division).strip().upper()
+    key = f"{cid}_{div}"
+
     # Use a more standard User-Agent to avoid being blocked
     loader = WebBaseLoader(
         url,
@@ -152,23 +177,22 @@ def process_url(url: str, course_id: str, division: str):
             return 0
     
     import datetime
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    today_str = session_date if session_date else datetime.date.today().strftime("%Y-%m-%d")
     
     # Add metadata
     for chunk in chunks:
-        chunk.metadata.update({"course_id": course_id, "division": division, "source": url, "session_date": today_str})
+        chunk.metadata.update({"course_id": cid, "division": div, "source": url, "session_date": today_str})
     
-    vector_store = get_vector_store(course_id, division)
+    vector_store = get_vector_store(cid, div)
     if vector_store:
         vector_store.add_documents(chunks)
     else:
         vector_store = FAISS.from_documents(chunks, embeddings)
         
     # Save to disk
-    vector_store.save_local(str(get_index_path(course_id, division)))
+    vector_store.save_local(str(get_index_path(cid, div)))
     
     # Update cache
-    key = f"{course_id}_{division}"
     faiss_indexes[key] = vector_store
     
     return len(chunks)
@@ -196,9 +220,18 @@ def get_context_filtered(course_id: str, division: str, query: str = "", session
         return ""
         
     k = min(40, vector_store.index.ntotal)
-    filter_dict = {"session_date": session_date} if session_date else {}
-    results = vector_store.similarity_search(query, k=k, filter=filter_dict) if k > 0 else []
+    print(f"DEBUG: get_context_filtered - course_id={course_id}, division={division}, session_date={session_date}, k={k}, total_in_index={vector_store.index.ntotal}")
+    
+    # Use a lambda for filtering to be safe across LangChain versions
+    if session_date:
+        results = vector_store.similarity_search(query, k=k, filter=lambda m: m.get('session_date') == session_date) if k > 0 else []
+    else:
+        results = vector_store.similarity_search(query, k=k) if k > 0 else []
 
+    print(f"DEBUG: get_context_filtered - results found: {len(results)}")
+    if len(results) > 0:
+        print(f"DEBUG: First result metadata: {results[0].metadata}")
+    
     from collections import defaultdict
     by_source = defaultdict(list)
     for doc in results:
@@ -206,6 +239,7 @@ def get_context_filtered(course_id: str, division: str, query: str = "", session
         by_source[source].append(doc.page_content)
 
     if not by_source:
+        print("DEBUG: No content found by source. Returning empty.")
         return ""
 
     source_sizes = {
