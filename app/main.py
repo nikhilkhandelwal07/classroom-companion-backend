@@ -1255,15 +1255,15 @@ async def get_participation(course_id: str, division: str, session_date: str, fa
         for _, student in enrolled_students.iterrows():
             sid = str(student['student_id'])
             
-            # Find cumulative avg
-            avg = None
+            # Find summative score
+            total_score = None
             if not all_course_scores.empty and 'student_id' in all_course_scores.columns:
                 s_scores = all_course_scores[all_course_scores['student_id'].astype(str) == sid]
                 if not s_scores.empty and 'score' in s_scores.columns:
                     # Ensure scores are numeric
                     valid_scores = pd.to_numeric(s_scores['score'], errors='coerce').dropna()
                     if not valid_scores.empty:
-                        avg = round(float(valid_scores.mean()), 1)
+                        total_score = int(valid_scores.sum())
 
             student_session = session_data_map.get(sid, {})
             results.append({
@@ -1271,7 +1271,7 @@ async def get_participation(course_id: str, division: str, session_date: str, fa
                 "student_name": student['student_name'],
                 "score": student_session.get("score"),
                 "remark": student_session.get("remark", ""),
-                "cumulative_avg": avg
+                "summative_score": total_score
             })
 
         return {"students": results}
@@ -1386,18 +1386,18 @@ async def get_participation_summary(course_id: str, division: str, faculty_email
             if not all_course_scores.empty and 'student_id' in all_course_scores.columns:
                 s_scores = all_course_scores[all_course_scores['student_id'].astype(str) == sid]
             
-            avg = None
+            total_score = None
             count = 0
             if not s_scores.empty and 'score' in s_scores.columns:
                 valid_scores = pd.to_numeric(s_scores['score'], errors='coerce').dropna()
                 if not valid_scores.empty:
-                    avg = round(float(valid_scores.mean()), 1)
+                    total_score = int(valid_scores.sum())
                     count = len(valid_scores)
 
             results.append({
                 "student_id": sid,
                 "student_name": student['student_name'],
-                "cumulative_avg": avg,
+                "summative_score": total_score,
                 "sessions_graded": count
             })
 
