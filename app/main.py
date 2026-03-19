@@ -1138,7 +1138,10 @@ Question: {request.question}
 Answer:"""
     
     content = call_llm_inference(prompt)
-    return {"answer": content if content else "I'm sorry, I couldn't find an answer in the provided material."}
+    return {
+        "answer": content if content else "I'm sorry, I couldn't find an answer in the provided material.",
+        "context_used": context
+    }
 
 @app.post("/clear-material")
 @app.delete("/clear-material")
@@ -1168,7 +1171,8 @@ async def clear_all(faculty_email: str = Depends(verify_token)):
 @app.get("/session-history")
 async def get_history(course_id: str, division: str, faculty_email: str = Depends(verify_token)):
     try:
-        df_history = cache.get_df("SessionHistory")
+        # Load fresh from Sheet to ensure immediate update after deletion in hosted environment
+        df_history = cache.load_one_sheet("SessionHistory")
         if df_history.empty:
             return {"data": []}
             
@@ -1410,7 +1414,8 @@ async def get_participation_summary(course_id: str, division: str, faculty_email
 @app.get("/questions")
 async def get_questions(course_id: str, division: str, status: str = "all", faculty_email: str = Depends(verify_token)):
     try:
-        df_questions = cache.get_df("Questions")
+        # Load fresh from Sheet to ensure immediate update for interactive session
+        df_questions = cache.load_one_sheet("Questions")
         if df_questions.empty:
             return {"questions": []}
 
@@ -1611,9 +1616,7 @@ Question: {request.question_text}"""
         ai_suggestion = answer
         for p in prefixes:
             ai_suggestion = ai_suggestion.replace(p, "")
-        ai_suggestion = ai_suggestion.strip()
-
-        # Step 6 — Save suggestion to Sheet
+        # Step 7 — Save suggestion to Sheet
         if ai_suggestion:
             ws = sheets.get_worksheet(config.GOOGLE_SHEET_ID, 'Questions')
             all_records = ws.get_all_records()
@@ -1633,14 +1636,14 @@ Question: {request.question_text}"""
                     suggestion_col_idx = sheet_headers.index('ai_suggestion') + 1
                     ws.update_cell(row_idx, suggestion_col_idx, ai_suggestion)
                     
-                    # Also update used_material in sheet if column exists
+                    # Update used_material
                     try:
                         used_mat_col_idx = sheet_headers.index('used_material') + 1
                         ws.update_cell(row_idx, used_mat_col_idx, "YES" if used_material else "NO")
                     except ValueError:
-                        pass # Column doesn't exist, ignore
+                        pass
                         
-                    cache.refresh_cache("Questions") # Refresh to show suggestion in UI
+                    cache.refresh_cache("Questions") 
                 except ValueError:
                     print("Error: 'ai_suggestion' column not found in Questions sheet.")
             else:
@@ -1648,10 +1651,10 @@ Question: {request.question_text}"""
 
         return {
             "ai_suggestion": ai_suggestion, 
-            "used_material": used_material, 
-            "has_context": bool(context)
+            "used_material": used_material,
+            "has_context": bool(context),
+            "context_used": context
         }
-
     except Exception as e:
         print(f"DEBUG Suggest Answer Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
