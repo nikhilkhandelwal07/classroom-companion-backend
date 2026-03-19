@@ -20,5 +20,5 @@ jobs:
         run: |
           git config user.email "deploy@github.com"
           git config user.name "GitHub Actions"
-          git remote add huggingface https://nikhil-kh:$HF_TOKEN@huggingface.co/spaces/nikhil-kh/classroom-companion-api
+          git remote add huggingface https://pgp25natasha:$HF_TOKEN@huggingface.co/spaces/pgp25natasha/classroom-companion-api
           git push huggingface main --force
